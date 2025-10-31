@@ -1055,6 +1055,22 @@ class NewInterfaceWaveformGenerator(WaveformGenerator):
         # SEOBNRv5 specific parameters
         params_gwsignal.update(self.extra_wf_kwargs)
 
+        # Optional TGR parameters
+        modes_pSEOB = [(2,2), (2,1), (3,3), (3,2), (4,4), (4,3), (5,5)]
+
+        domega_dict = { f"{ell},{m}": p.get(f"domega{ell}{m}0", 0) for ell, m in modes_pSEOB}
+        dtau_dict = { f"{ell},{m}": p.get(f"dtau{ell}{m}0", 0) for ell, m in modes_pSEOB}
+        dA_dict = { f"{ell},{m}": p.get(f"dA{ell}{m}", 0) for ell, m in modes_pSEOB}
+        dw_dict = { f"{ell},{m}": p.get(f"dW{ell}{m}", 0) for ell, m in modes_pSEOB}
+
+        params_gwsignal.update(domega_dict=domega_dict)
+        params_gwsignal.update(dtau_dict=dtau_dict)
+        params_gwsignal.update(dA_dict=dA_dict)
+        params_gwsignal.update(dw_dict=dw_dict)
+        params_gwsignal.update(dTpeak=p.get("dTpeak", 0))
+        params_gwsignal.update(da6=p.get("da6", 0))
+        params_gwsignal.update(ddSO=p.get("ddSO", 0))
+
         if return_target_function:
             # This is a hack to make compatible with LAL version. Target functions for
             # new waveform generator are defined in generate_FD_waveform, etc.
