@@ -1,6 +1,6 @@
 import torch
 
-from dingo.gw.domains import UniformFrequencyDomain, TimeDomain
+from dingo.gw.domains import UniformFrequencyDomain, UniformTimeDomain
 from dingo.gw.domains import build_domain
 import pytest
 import numpy as np

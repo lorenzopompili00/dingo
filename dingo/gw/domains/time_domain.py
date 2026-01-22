@@ -4,16 +4,47 @@ from functools import lru_cache
 from .base import Domain
 
 
-class TimeDomain(Domain):
+class UniformTimeDomain(Domain):
     """Defines the physical time domain on which the data of interest live.
 
     The time bins are assumed to be uniform between [0, duration]
     with spacing 1 / sampling_rate.
+
+    TODO: Add BaseTimeDomain class and make this inherit from it.
     """
 
     def __init__(self, time_duration: float, sampling_rate: float):
         self._time_duration = time_duration
         self._sampling_rate = sampling_rate
+
+    def update(self, new_settings: dict):
+        """
+        Update the domain with new settings.
+
+        Parameters
+        ----------
+        new_settings : dict
+            Settings dictionary.
+        """
+        new_settings = new_settings.copy()
+        if "type" in new_settings and new_settings.pop("type") not in [
+            "UniformTimeDomain",
+            "TimeDomain",
+            "TD",
+        ]:
+            raise ValueError("Cannot update domain to type other than UniformTimeDomain.")
+
+        for k, v in new_settings.items():
+            if k == "time_duration":
+                self._time_duration = v
+            elif k == "sampling_rate":
+                self._sampling_rate = v
+            else:
+                raise KeyError(f"Invalid key for domain update: {k}.")
+
+        # Clear cached values
+        self.__len__.cache_clear()
+        self.__call__.cache_clear()
 
     @lru_cache()
     def __len__(self):
@@ -26,6 +57,14 @@ class TimeDomain(Domain):
         num_bins = self.__len__()
         return np.linspace(
             0.0, self._time_duration, num=num_bins, endpoint=False, dtype=np.float32
+        )
+
+    @property
+    def time_array(self) -> np.ndarray:
+        """Array of uniform times at which data is sampled"""
+        n_bins = int(self._time_duration * self._sampling_rate)
+        return np.linspace(
+            0.0, self._time_duration, num=n_bins, endpoint=False, dtype=np.float32
         )
 
     @property
@@ -51,7 +90,23 @@ class TimeDomain(Domain):
         return 1.0 / np.sqrt(2.0 * self.delta_t)
 
     def time_translate_data(self, data, dt) -> np.ndarray:
-        raise NotImplementedError
+        """
+        Time translate data by dt seconds using circular shift.
+
+        Parameters
+        ----------
+        data : np.ndarray
+            Time-domain data array.
+        dt : float
+            Time shift in seconds. Positive dt shifts data to later times.
+
+        Returns
+        -------
+        np.ndarray
+            Time-shifted data.
+        """
+        n_shift = int(round(dt * self._sampling_rate))
+        return np.roll(data, n_shift, axis=-1)
 
     @property
     def f_max(self) -> float:
@@ -80,7 +135,7 @@ class TimeDomain(Domain):
     def domain_dict(self):
         """Enables to rebuild the domain via calling build_domain(domain_dict)."""
         return {
-            "type": "TimeDomain",
+            "type": "UniformTimeDomain",
             "time_duration": self._time_duration,
             "sampling_rate": self._sampling_rate,
         }

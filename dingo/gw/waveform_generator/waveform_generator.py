@@ -27,7 +27,7 @@ from dingo.gw.domains import (
     Domain,
     UniformFrequencyDomain,
     MultibandedFrequencyDomain,
-    TimeDomain,
+    UniformTimeDomain,
 )
 from dingo.gw.transforms.waveform_transforms import DecimateAll
 
@@ -221,16 +221,23 @@ class WaveformGenerator:
             self.domain, (UniformFrequencyDomain, MultibandedFrequencyDomain)
         ):
             wf_generator = self.generate_FD_waveform
-        elif isinstance(self.domain, TimeDomain):
+        elif isinstance(self.domain, UniformTimeDomain):
             wf_generator = self.generate_TD_waveform
         else:
             raise ValueError(f"Unsupported domain type {type(self.domain)}.")
 
         try:
-            if target_function is not None:
-                wf_dict = wf_generator(parameters_generator, target_function)
-            else:
+            if isinstance(self.domain, (UniformFrequencyDomain, MultibandedFrequencyDomain)):
+                if target_function is not None:
+                    wf_dict = wf_generator(parameters_generator, target_function)
+                else:
+                    wf_dict = wf_generator(parameters_generator)
+            elif isinstance(self.domain, UniformTimeDomain):
                 wf_dict = wf_generator(parameters_generator)
+                print(len(wf_dict['h_plus']))
+                
+            else:
+                raise ValueError(f"Unsupported domain type {type(self.domain)}.")
         except Exception as e:
             if not catch_waveform_errors:
                 raise
@@ -318,7 +325,7 @@ class WaveformGenerator:
                 target_function = "SimInspiralFD"
             elif isinstance(self.domain, MultibandedFrequencyDomain):
                 target_function = "SimInspiralChooseFDWaveformSequence"
-            elif isinstance(self.domain, TimeDomain):
+            elif isinstance(self.domain, UniformTimeDomain):
                 target_function = "SimInspiralTD"
             else:
                 raise ValueError(f"Unsupported domain type {type(self.domain)}.")
@@ -395,11 +402,11 @@ class WaveformGenerator:
                 f_min = self.domain.f_min
             # parameters needed for TD waveforms
             delta_t = 0.5 / self.domain.f_max
-        elif isinstance(self.domain, TimeDomain):
-            raise NotImplementedError("Time domain not supported yet.")
-            # FIXME: compute f_min from duration or specify it if SimInspiralTD
-            #  is used for a native FD waveform
-            f_min = 20.0
+        elif isinstance(self.domain, UniformTimeDomain):
+            if self.f_start is not None:
+                f_min = self.f_start
+            else:
+                f_min = 20.0
             delta_t = self.domain.delta_t
             # parameters needed for FD waveforms
             f_max = 1.0 / self.domain.delta_t
