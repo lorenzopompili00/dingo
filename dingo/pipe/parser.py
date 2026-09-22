@@ -5,6 +5,9 @@
 import argparse
 
 import configargparse
+from packaging import version
+
+import bilby_pipe
 from bilby_pipe.bilbyargparser import BilbyArgParser
 from bilby_pipe.utils import (
     ENVIRONMENT_DEFAULTS,
@@ -16,6 +19,9 @@ from bilby_pipe.utils import (
 )
 
 logger.name = "dingo_pipe"
+
+# bilby_pipe v1.8.0 changed mutually exclusive group handling
+_BILBY_PIPE_V1_8 = version.parse(bilby_pipe.__version__) >= version.parse("1.8.0")
 
 
 class StoreBoolean(argparse.Action):
@@ -58,6 +64,13 @@ def create_parser(top_level=True, usage=None):
         allow_abbrev=False,
         formatter_class=configargparse.ArgumentDefaultsRawHelpFormatter,
     )
+    # bilby_pipe v1.8.0+ uses exclusive_keys dict instead of add_mutually_exclusive_group()
+    if _BILBY_PIPE_V1_8:
+        parser.exclusive_keys = {
+            "Detector arguments": ["--psd-dict", "--asd-dataset"],
+            "Injection arguments": ["--injection-file", "--injection-dict"],
+            "Prior arguments": ["--prior-file", "--prior-dict"],
+        }
     parser.add("ini", type=str, is_config_file=True, help="Configuration ini file")
     parser.add("-v", "--verbose", action="store_true", help="Verbose output")
     # parser.add(
@@ -68,8 +81,10 @@ def create_parser(top_level=True, usage=None):
 
     calibration_parser = parser.add_argument_group(
         "Calibration arguments",
-        description="Which calibration model and settings to use. Calibration "
-        "uncertainty is marginalizaed over during importance sampling.",
+        description="Settings for handling calibration uncertainty during importance "
+        "sampling. Calibration uncertainty can either be marginalized over (averaging "
+        "likelihoods over multiple calibration draws) or sampled (treating calibration "
+        "parameters as part of the posterior). These modes are mutually exclusive.",
     )
     calibration_parser.add(
         "--calibration-model",
@@ -77,6 +92,20 @@ def create_parser(top_level=True, usage=None):
         default=None,
         choices=["CubicSpline", None],
         help="Choice of calibration model, if None, no calibration is used",
+    )
+
+    calibration_parser.add(
+        "--calibration-mode",
+        type=nonestr,
+        default="marginalize",
+        choices=["marginalize", "sample", None],
+        help=(
+            "How to handle calibration uncertainty. 'marginalize' averages likelihoods "
+            "over multiple calibration draws. 'sample' treats calibration parameters as "
+            "part of the posterior (importance sampling over calibration). If None or "
+            "calibration-model is None, no calibration handling is performed. "
+            "Default is 'marginalize'."
+        ),
     )
 
     calibration_parser.add(
@@ -112,8 +141,8 @@ def create_parser(top_level=True, usage=None):
         type=int,
         default=1000,
         help=(
-            "Number of calibration curves to use in marginalizing over calibration "
-            "uncertainty"
+            "Number of calibration curves to use when marginalizing over calibration "
+            "uncertainty. Only used when calibration-mode='marginalize'."
         ),
     )
     #
@@ -285,6 +314,16 @@ def create_parser(top_level=True, usage=None):
         ),
     )
     data_gen_pars.add(
+        "--fetch-open-data-kwargs",
+        type=nonestr,
+        default=None,
+        help=(
+            "Dictionary of additional kwargs to pass to `fetch_open_data`. "
+            "By default, bilby_pipe requests `sample_rate=16384`. This can "
+            "be overwritten by passing `sample_rate=4096` to this argument."
+        ),
+    )
+    data_gen_pars.add(
         "--frame-type-dict",
         type=nonestr,
         default=None,
@@ -365,17 +404,36 @@ def create_parser(top_level=True, usage=None):
             "will have their seeds set as {generation_seed = base_seed + job_idx}."
         ),
     )
-    psd_dict_parser = det_parser.add_mutually_exclusive_group()
-    psd_dict_parser.add(
-        "--psd-dict", type=nonestr, default=None, help="Dictionary of PSD files to use"
-    )
-    psd_dict_parser.add(
-        "--asd-dataset",
-        type=nonestr,
-        default=None,
-        help="DINGO ASDDataset file to be used for injections. If specified, dingo_pipe "
-        "will generate PSD files based on random ASDs in the dataset.",
-    )
+    # Mutually exclusive: --psd-dict / --asd-dataset
+    if _BILBY_PIPE_V1_8:
+        det_parser.add(
+            "--psd-dict",
+            type=nonestr,
+            default=None,
+            help="Dictionary of PSD files to use",
+        )
+        det_parser.add(
+            "--asd-dataset",
+            type=nonestr,
+            default=None,
+            help="DINGO ASDDataset file to be used for injections. If specified, dingo_pipe "
+            "will generate PSD files based on random ASDs in the dataset.",
+        )
+    else:
+        psd_dict_parser = det_parser.add_mutually_exclusive_group()
+        psd_dict_parser.add(
+            "--psd-dict",
+            type=nonestr,
+            default=None,
+            help="Dictionary of PSD files to use",
+        )
+        psd_dict_parser.add(
+            "--asd-dataset",
+            type=nonestr,
+            default=None,
+            help="DINGO ASDDataset file to be used for injections. If specified, dingo_pipe "
+            "will generate PSD files based on random ASDs in the dataset.",
+        )
     det_parser.add(
         "--psd-fractional-overlap",
         # default=0.5,
@@ -389,11 +447,7 @@ def create_parser(top_level=True, usage=None):
         default=2.0,
         help=("Time (in s) after the trigger_time to the end of the segment"),
     )
-    det_parser.add(
-        "--sampling-frequency",
-        default=4096,
-        type=nonefloat,
-    )
+    det_parser.add("--sampling-frequency", default=4096, type=float)
 
     det_parser.add(
         "--psd-length",
@@ -450,6 +504,21 @@ def create_parser(top_level=True, usage=None):
         ),
     )
     det_parser.add(
+        "--psd-notch-dict",
+        default=None,
+        type=nonestr,
+        help=(
+            "Dictionary of PSD notch intervals per detector, e.g. "
+            "{H1: [50, 60], L1: [50, 60]}.  Each value is [f_lo, f_hi] in Hz "
+            "(a single interval) or [[f_lo1, f_hi1], [f_lo2, f_hi2]] "
+            "(multiple intervals).  The ASD is set to 1 in these regions "
+            "during data generation.  At sampling time the same regions are "
+            "automatically detected from the stored ASD and the corresponding "
+            "tokens are masked.  Not needed when the ASD has already been "
+            "pre-notched externally (e.g. by the Asimov pipeline)."
+        ),
+    )
+    det_parser.add(
         "--tukey-roll-off",
         default=1.0,
         type=nonefloat,
@@ -473,22 +542,40 @@ def create_parser(top_level=True, usage=None):
         default=False,
         help="Create data from an injection file",
     )
-    injection_parser_input = injection_parser.add_mutually_exclusive_group()
-    injection_parser_input.add(
-        "--injection-dict",
-        type=nonestr,
-        default=None,
-        help="A single injection dictionary given in the ini file",
-    )
-    injection_parser_input.add(
-        "--injection-file",
-        type=nonestr,
-        default=None,
-        help=(
-            "Injection file to use. See `bilby_pipe_create_injection_file --help`"
-            " for supported formats"
-        ),
-    )
+    # Mutually exclusive: --injection-dict / --injection-file
+    if _BILBY_PIPE_V1_8:
+        injection_parser.add(
+            "--injection-dict",
+            type=nonestr,
+            default=None,
+            help="A single injection dictionary given in the ini file",
+        )
+        injection_parser.add(
+            "--injection-file",
+            type=nonestr,
+            default=None,
+            help=(
+                "Injection file to use. See `bilby_pipe_create_injection_file --help`"
+                " for supported formats"
+            ),
+        )
+    else:
+        injection_parser_input = injection_parser.add_mutually_exclusive_group()
+        injection_parser_input.add(
+            "--injection-dict",
+            type=nonestr,
+            default=None,
+            help="A single injection dictionary given in the ini file",
+        )
+        injection_parser_input.add(
+            "--injection-file",
+            type=nonestr,
+            default=None,
+            help=(
+                "Injection file to use. See `bilby_pipe_create_injection_file --help`"
+                " for supported formats"
+            ),
+        )
     injection_parser.add(
         "--injection-numbers",
         action="append",
@@ -660,7 +747,7 @@ def create_parser(top_level=True, usage=None):
         "--request-memory-importance-sampling",
         type=float,
         default=8.0,
-        help="Memory allocation request (GB) for importance sampling step. Default is 8GB"
+        help="Memory allocation request (GB) for importance sampling step. Default is 8GB",
     )
     submission_parser.add(
         "--request-cpus-importance-sampling",
@@ -1185,22 +1272,40 @@ def create_parser(top_level=True, usage=None):
             "the prior is changed."
         ),
     )
-    prior_parser_main = prior_parser.add_mutually_exclusive_group()
-    prior_parser_main.add(
-        "--prior-file", type=nonestr, default=None, help="The prior file"
-    )
-    prior_parser_main.add(
-        "--prior-dict",
-        type=nonestr,
-        default=None,
-        help=(
-            "A dictionary of priors (alternative to prior-file). Multiline "
-            "dictionaries are supported, but each line must contain a single"
-            "parameter specification and finish with a comma. Dingo priors are set at "
-            "network training time, so the prior-dict should not be provided by the "
-            "user! Use 'prior-dict-update' to update the prior for importance sampling."
-        ),
-    )
+    # Mutually exclusive: --prior-file / --prior-dict
+    if _BILBY_PIPE_V1_8:
+        prior_parser.add(
+            "--prior-file", type=nonestr, default=None, help="The prior file"
+        )
+        prior_parser.add(
+            "--prior-dict",
+            type=nonestr,
+            default=None,
+            help=(
+                "A dictionary of priors (alternative to prior-file). Multiline "
+                "dictionaries are supported, but each line must contain a single"
+                "parameter specification and finish with a comma. Dingo priors are set at "
+                "network training time, so the prior-dict should not be provided by the "
+                "user! Use 'prior-dict-update' to update the prior for importance sampling."
+            ),
+        )
+    else:
+        prior_parser_main = prior_parser.add_mutually_exclusive_group()
+        prior_parser_main.add(
+            "--prior-file", type=nonestr, default=None, help="The prior file"
+        )
+        prior_parser_main.add(
+            "--prior-dict",
+            type=nonestr,
+            default=None,
+            help=(
+                "A dictionary of priors (alternative to prior-file). Multiline "
+                "dictionaries are supported, but each line must contain a single"
+                "parameter specification and finish with a comma. Dingo priors are set at "
+                "network training time, so the prior-dict should not be provided by the "
+                "user! Use 'prior-dict-update' to update the prior for importance sampling."
+            ),
+        )
     prior_parser.add(
         "--enforce-signal-duration",
         action=StoreBoolean,
@@ -1253,10 +1358,6 @@ def create_parser(top_level=True, usage=None):
 
     # sampler_parser = parser.add_argument_group(title="Sampler arguments")
     # sampler_parser.add("--sampler", type=str, default="dynesty", help="Sampler to use")
-    # sampler_parser.add(
-    #     "--sampling-seed", default=None, type=noneint, help="Random sampling seed"
-    # )
-
     # sampler_parser.add(
     #     "--sampler-kwargs",
     #     type=str,
@@ -1450,6 +1551,29 @@ def create_parser(top_level=True, usage=None):
         "unconditional flow for the GNPE proxies.",
     )
     sampler_parser.add(
+        "--fixed-context-parameters",
+        type=nonestr,
+        default=None,
+        help="Dictionary of fixed values for the model's context parameters, e.g. "
+        "{chirp_mass_proxy: 1.19786, ra: 3.44616, dec: -0.408084}. Required for "
+        "single-network models conditioned on context parameters (single-step "
+        "GNPE, e.g. binary neutron stars): proxy entries parameterize the data "
+        "preparation (chirp-mass heterodyning), and all pinned values are "
+        "recorded with the samples.",
+    )
+    sampler_parser.add(
+        "--chirp-mass-scan",
+        type=nonestr,
+        default=None,
+        help="Determine the trigger chirp mass from the data before sampling, "
+        "instead of pinning chirp_mass_proxy in fixed-context-parameters "
+        "(mutually exclusive with such a pin). 'true' scans with defaults "
+        "derived from the model (grid from the training prior and kernel, 10 "
+        "draws per point, maximum-likelihood winner); a dictionary overrides "
+        "individual settings, e.g. {num_samples: 10, overlap_factor: 2, "
+        "block_size: 32}.",
+    )
+    sampler_parser.add(
         "--device",
         type=str,
         default="cuda",
@@ -1474,6 +1598,15 @@ def create_parser(top_level=True, usage=None):
         default=50000,
         help="Number of samples per batch. This is limited by the amount of GPU RAM. "
         "Default is 50000",
+    )
+    sampler_parser.add(
+        "--sampling-seed",
+        type=noneint,
+        default=None,
+        help="Random seed (torch, numpy, bilby) for the sampling and importance-"
+        "sampling jobs; each job draws and logs its own if not given. Importance-"
+        "sampling job n uses the seed plus n. Importance sampling is reproducible "
+        "only with one process.",
     )
     sampler_parser.add(
         "--density-recovery-settings",

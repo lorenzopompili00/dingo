@@ -73,9 +73,17 @@ class SVDBasis(DingoDataset):
             self.n = n
             self.s = s
         elif method == "scipy":
-            # Code below uses scipy's svd tool. Likely slower.
-            # The deterministic SVD has Complexity O(mn^2).
-            U, s, Vh = scipy.linalg.svd(training_data, full_matrices=False)
+            if (n == 0) or (n >= training_data.shape[1]):
+                # Code below uses scipy's svd tool. Likely slower.
+                # The deterministic SVD has Complexity O(mn^2).
+                U, s, Vh = scipy.linalg.svd(training_data, full_matrices=False)
+            else:
+                # Use partial SVD if only a subset of basis elements are requested
+                U, s, Vh = scipy.sparse.linalg.svds(training_data, k=n)
+
+                # Sort singular values in non-increasing order
+                idx = np.argsort(s)[::-1]
+                U, s, Vh = U[:, idx], s[idx], Vh[idx, :]
             V = Vh.T.conj()
 
             if (n == 0) or (n > len(V)):
@@ -187,15 +195,17 @@ class SVDBasis(DingoDataset):
         """
         return data @ self.V
 
-    def from_file(self, filename):
+    def from_file(self, filename, dtype_map=None):
         """
         Load the SVD basis from a HDF5 file.
 
         Parameters
         ----------
         filename : str
+        dtype_map : dict, optional
+            Passed through to `DingoDataset.from_file`.
         """
-        super().from_file(filename)
+        super().from_file(filename, dtype_map=dtype_map)
         if self.V is None:
             raise KeyError("File does not contain SVD V matrix. No SVD basis to load.")
         self.Vh = self.V.T.conj()

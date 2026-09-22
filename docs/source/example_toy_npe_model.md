@@ -177,11 +177,6 @@ While this file contains numerous settings that are discussed in [training](trai
 data:
   waveform_dataset_path: training_data/waveform_dataset.hdf5  # Contains intrinsic waveforms
   train_fraction: 0.95
-  window:  # Needed to calculate window factor for simulated data
-    type: tukey
-    f_s: 4096
-    T: 4.0
-    roll_off: 0.4
   detectors:
     - H1
     - L1
@@ -216,7 +211,7 @@ model:
       num_transform_blocks: 5
       activation: elu
       dropout_probability: 0.0
-      batch_norm: True
+      norm: BatchNorm
       num_bins: 8
       base_transform_type: rq-coupling
   # kwargs for embedding net
@@ -225,7 +220,7 @@ model:
     hidden_dims: [1024, 512, 256, 128]
     activation: elu
     dropout: 0.0
-    batch_norm: True
+    norm: BatchNorm
     svd:
       num_training_samples: 1000
       num_validation_samples: 100
