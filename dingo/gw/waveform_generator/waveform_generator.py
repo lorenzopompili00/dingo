@@ -40,6 +40,7 @@ DEFAULT_ELL_MAX = {
     # IMRPhenomXPNR's polarizations (mismatch ~1e-3), so it is not enabled for it.
     "IMRPhenomXPNR": 4,
     "SEOBNRv5PHM": 4,
+    "SEOBNRv6EPHM": 4,
     "NRSur7dq4": 4,
 }
 
@@ -1280,7 +1281,7 @@ class NewInterfaceWaveformGenerator(WaveformGenerator):
         return (
             self.use_dft_phase_decomposition
             and self.spin_conversion_phase is not None
-            and self.approximant_str == "SEOBNRv5PHM"
+            and self.approximant_str in ("SEOBNRv5PHM", "SEOBNRv6EPHM")
         )
 
     def _convert_parameters(
@@ -1354,6 +1355,12 @@ class NewInterfaceWaveformGenerator(WaveformGenerator):
             "ModeArray": self.mode_list,
             "condition": 1,
         }
+        # Eccentric models: the eccentricity and the anomaly at f22_start, the
+        # latter as gwsignal's meanPerAno (for pyseobnr the relativistic anomaly).
+        if "eccentricity" in p:
+            params_gwsignal["eccentricity"] = p["eccentricity"] * u.dimensionless_unscaled
+        if "mean_per_ano" in p:
+            params_gwsignal["meanPerAno"] = p["mean_per_ano"] * u.rad
 
         # SEOBNRv5 specific parameters
         params_gwsignal.update(self.extra_wf_kwargs)
@@ -1526,10 +1533,7 @@ class NewInterfaceWaveformGenerator(WaveformGenerator):
                 # Step 2: Transform modes to target domain.
                 # Not required here, as approximant domain and target domain are both FD.
 
-            elif (
-                self.approximant_str == "SEOBNRv5PHM"
-                or self.approximant_str == "SEOBNRv5HM"
-            ):
+            elif self.approximant_str in ("SEOBNRv5PHM", "SEOBNRv5HM", "SEOBNRv6EPHM"):
                 if self.uses_dft_phase_decomposition:
                     # Optimized path: the EOB dynamics are solved once, then
                     # the cached co-precessing modes are projected onto the
@@ -1540,6 +1544,15 @@ class NewInterfaceWaveformGenerator(WaveformGenerator):
                     )
                     return self._pol_m_from_multi_phase(
                         hpc_fd_list, phi_c_offsets, ell_max
+                    )
+                if self.approximant_str == "SEOBNRv6EPHM":
+                    # The individual-mode route generates the modes from a lower
+                    # starting frequency, but SEOBNRv6EPHM's eccentricity and
+                    # anomaly are defined at f22_start.
+                    raise NotImplementedError(
+                        "SEOBNRv6EPHM is decomposed through the DFT phase "
+                        "decomposition only (use_dft_phase_decomposition=True and a "
+                        "fixed spin_conversion_phase)."
                     )
 
                 # Step 1: generate waveform modes in L0 frame in native domain
@@ -1778,6 +1791,10 @@ class NewInterfaceWaveformGenerator(WaveformGenerator):
         # Set pyseobnr-specific keys
         pyseobnr_params["approximant"] = self.approximant_str
         pyseobnr_params["f_ref"] = pyseobnr_params.pop("f22_ref", self.f_ref)
+        # gwsignal's meanPerAno is pyseobnr's relativistic anomaly (its gwsignal
+        # default), which pyseobnr itself calls rel_anomaly.
+        if "meanPerAno" in pyseobnr_params:
+            pyseobnr_params["rel_anomaly"] = pyseobnr_params.pop("meanPerAno")
 
         # Pass frequency domain parameters from DINGO's domain
         pyseobnr_params["deltaF"] = self.domain.delta_f
