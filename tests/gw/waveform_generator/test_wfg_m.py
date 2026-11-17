@@ -27,6 +27,7 @@ from dingo.gw.waveform_generator.waveform_generator import DEFAULT_ELL_MAX
 from dingo.gw.gwutils import get_mismatch
 from dingo.gw.domains import build_domain
 from dingo.gw.prior import build_prior_with_defaults
+from packaging.version import Version
 
 
 @pytest.fixture
@@ -272,6 +273,9 @@ def test_generate_hplus_hcross_m(intrinsic_prior, wfg, num_evaluations, toleranc
 dft_approximant_list = [
     a for a in approximant_list if a in ("IMRPhenomXPHM", "SEOBNRv5PHM")
 ]
+# Models with no individual-mode route, so only the DFT tests that do not compare
+# against it apply.
+dft_only_approximant_list = dft_approximant_list + ["IMRPhenomXPNR"]
 
 DFT_PARAMETERS = [
     {
@@ -314,8 +318,8 @@ def dft_wfg_pair(uniform_fd_domain, approximant):
         # ell_max comes from the model, which reports max_ell_returned.
         wfg_class, mode_list = NewInterfaceWaveformGenerator, None
     else:
-        # XPHM's default mode content. The LAL path has no model to ask, so
-        # mode_list is what sizes the phase grid.
+        # XPHM's (and XPNR's) default mode content. The LAL path has no model to
+        # ask, so mode_list is what sizes the phase grid.
         wfg_class, mode_list = WaveformGenerator, [
             (2, 2),
             (2, 1),
@@ -354,9 +358,9 @@ def dft_vs_standard_tolerance(approximant):
     disagreement bounded here is the individual-mode route's, already known and
     already tolerated above.
 
-    For SEOBNRv5PHM both routes track the model closely and the difference is a
-    ~1 ns offset from epoch rounding plus ~6e-6 rad of phase scatter, from
-    conditioning and FFT-ing the polarizations rather than the individual modes.
+    For SEOBNRv5PHM both routes track the model closely and the difference is
+    ~1e-6 rad of phase scatter, from conditioning and FFT-ing the polarizations
+    rather than the individual modes.
 
     Either way the bound is set by the weakest m-components: the absolute error is
     roughly common across m while the amplitudes span five orders of magnitude, so
@@ -366,8 +370,8 @@ def dft_vs_standard_tolerance(approximant):
     return 1e-4 if approximant == "IMRPhenomXPHM" else 1e-5
 
 
-@pytest.mark.parametrize("approximant", dft_approximant_list)
-def test_dft_reconstructs_phase_shift(dft_wfg_pair, uniform_fd_domain):
+@pytest.mark.parametrize("approximant", dft_only_approximant_list)
+def test_dft_reconstructs_phase_shift(dft_wfg_pair, uniform_fd_domain, approximant):
     """The DFT m-components reproduce a phase-shifted waveform.
 
     This is the invariant the DFT inversion has to satisfy, and it pins down the
@@ -377,11 +381,23 @@ def test_dft_reconstructs_phase_shift(dft_wfg_pair, uniform_fd_domain):
     trigonometric polynomial to be right, not just the sampled values.
 
     get_mismatch normalises, so it cannot see an overall scale error. The
-    amplitude is therefore checked separately: measured departures from unity are
-    1e-15 (XPHM) and 3e-9 (SEOBNRv5PHM).
+    amplitude is therefore checked separately. Both agree to round-off: measured
+    mismatches are 2e-16 (XPHM) and 6e-14 (SEOBNRv5PHM), and departures of the
+    amplitude from unity 1e-15 and 2e-14. For SEOBNRv5PHM this needs the time shift
+    of the direct route in double precision (see
+    test_time_shift_in_double_precision); in single precision the two differed by
+    a mismatch of 3e-12 and an amplitude of 3e-9.
+
+    IMRPhenomXPNR agrees to round-off as well (3e-16 and 5e-15), once lalsimulation
+    has the fix of its antisymmetric contribution (in releases after 6.2.1). Before
+    it, that contribution's phase dependence is not exactly that of m-components,
+    and the amplitude agrees only to 2.5e-8 here.
     """
     wfg_dft, _ = dft_wfg_pair
     min_idx = uniform_fd_domain.min_idx
+    tolerance = 1e-12
+    if approximant == "IMRPhenomXPNR" and Version(LS.__version__) <= Version("6.2.1"):
+        tolerance = 1e-6
 
     for p in DFT_PARAMETERS:
         pol_m = wfg_dft.generate_hplus_hcross_m(p)
@@ -397,13 +413,13 @@ def test_dft_reconstructs_phase_shift(dft_wfg_pair, uniform_fd_domain):
                     uniform_fd_domain,
                     asd_file="aLIGO_ZERO_DET_high_P_asd.txt",
                 )
-                assert mismatch < 1e-9, f"{name}, phase_shift={phase_shift}"
+                assert mismatch < tolerance, f"{name}, phase_shift={phase_shift}"
 
                 amplitude_ratio = np.linalg.norm(pol[name][min_idx:]) / np.linalg.norm(
                     pol_ref[name][min_idx:]
                 )
                 assert (
-                    abs(amplitude_ratio - 1) < 1e-6
+                    abs(amplitude_ratio - 1) < tolerance
                 ), f"{name}, phase_shift={phase_shift}, ratio={amplitude_ratio}"
 
 
@@ -431,6 +447,46 @@ def test_dft_matches_standard_path(
 
 
 @pytest.mark.parametrize("approximant", dft_approximant_list)
+def test_time_shift_in_double_precision(dft_wfg_pair, monkeypatch):
+    """Waveforms do not depend on the precision of the domain's frequencies.
+
+    The domain stores its frequencies as float32, and the waveform generators
+    multiply by exp(-2 pi i f dt) to undo the epoch of the LAL / gwsignal output
+    (dt ~ 0.1 s). Computed in single precision, rounding 2 pi dt shifts the
+    waveform by up to dt * 2**-24 ~ 6 ns, and rounding the phase adds ~2e-6 rad
+    of noise. This covers the direct route of both approximants and the
+    individual-mode route of SEOBNRv5PHM, whose time-domain modes are shifted the
+    same way.
+    """
+    from dingo.gw.domains import UniformFrequencyDomain
+
+    wfg_dft, wfg_std = dft_wfg_pair
+    p = DFT_PARAMETERS[0]
+    reference = [wfg_dft.generate_hplus_hcross(p), wfg_std.generate_hplus_hcross_m(p)]
+
+    sample_frequencies = UniformFrequencyDomain.sample_frequencies
+    monkeypatch.setattr(
+        UniformFrequencyDomain,
+        "sample_frequencies",
+        property(lambda self: sample_frequencies.fget(self).astype(np.float64)),
+    )
+    in_float64 = [wfg_dft.generate_hplus_hcross(p), wfg_std.generate_hplus_hcross_m(p)]
+
+    pol, pol_m = reference
+    pol_64, pol_m_64 = in_float64
+    for name in pol:
+        np.testing.assert_allclose(
+            pol[name], pol_64[name], rtol=0, atol=1e-12 * np.abs(pol_64[name]).max()
+        )
+    for m in pol_m:
+        for name in pol_m[m]:
+            scale = np.abs(pol_m_64[m][name]).max()
+            np.testing.assert_allclose(
+                pol_m[m][name], pol_m_64[m][name], rtol=0, atol=1e-12 * scale
+            )
+
+
+@pytest.mark.parametrize("approximant", dft_only_approximant_list)
 def test_dft_phase_grid_ignores_transform(dft_wfg_pair):
     """self.transform must stay out of the DFT phase grid.
 
@@ -449,7 +505,8 @@ def test_dft_phase_grid_ignores_transform(dft_wfg_pair):
             np.testing.assert_array_equal(pol_m_with_transform[m][name], expected)
 
 
-def test_default_ell_max_matches_mode_content(uniform_fd_domain):
+@pytest.mark.parametrize("approximant", ["IMRPhenomXPHM", "IMRPhenomXPNR"])
+def test_default_ell_max_matches_mode_content(uniform_fd_domain, approximant):
     """DEFAULT_ELL_MAX must match what the approximant actually returns.
 
     Users normally do not pass mode_list -- the settings stored with a trained
@@ -459,14 +516,42 @@ def test_default_ell_max_matches_mode_content(uniform_fd_domain):
     instead, by the max_ell_returned check in _generate_multi_phase_fd_pols.
     """
     wfg = WaveformGenerator(
-        approximant="IMRPhenomXPHM",
+        approximant=approximant,
         domain=uniform_fd_domain,
         f_ref=10.0,
         f_start=10.0,
         spin_conversion_phase=0.0,
     )
-    hlm_fd, _ = wfg.generate_FD_modes_LO(DFT_PARAMETERS[0])
-    assert max(ell for ell, _ in hlm_fd) == DEFAULT_ELL_MAX["IMRPhenomXPHM"]
+    hlm_fd = LS.SimInspiralChooseFDModes(
+        *wfg._convert_parameters(
+            {**DFT_PARAMETERS[0], "f_ref": wfg.f_ref},
+            target_function="SimInspiralChooseFDModes",
+        )
+    )
+    ells = []
+    while hlm_fd is not None:
+        ells.append(hlm_fd.l)
+        hlm_fd = hlm_fd.next
+    assert max(ells) == DEFAULT_ELL_MAX[approximant]
+
+
+def test_xpnr_has_no_individual_mode_route(uniform_fd_domain):
+    """IMRPhenomXPNR is decomposed through the DFT only. Built from LAL's modes the
+    way IMRPhenomXPHM's are, its m-components would miss the model's polarizations
+    by a mismatch of ~1e-3 (6e-3 to 2e-2 before lalsimulation's fix of the
+    antisymmetric contribution), against ~1e-6 for XPHM, so the individual-mode
+    route refuses it rather than return them."""
+    kwargs = dict(
+        approximant="IMRPhenomXPNR",
+        domain=uniform_fd_domain,
+        f_ref=10.0,
+        f_start=10.0,
+        spin_conversion_phase=0.0,
+    )
+    assert WaveformGenerator(**kwargs).uses_dft_phase_decomposition
+    wfg = WaveformGenerator(**kwargs, use_dft_phase_decomposition=False)
+    with pytest.raises(NotImplementedError):
+        wfg.generate_hplus_hcross_m(DFT_PARAMETERS[0])
 
 
 def test_unknown_approximant_is_an_error_not_a_guess(uniform_fd_domain):
@@ -494,6 +579,27 @@ def test_dft_phase_decomposition_is_the_default(uniform_fd_domain):
         spin_conversion_phase=0.0,
     )
     assert wfg.use_dft_phase_decomposition is True
+
+
+def test_mode_decomposition_requires_a_fixed_spin_convention(uniform_fd_domain):
+    """The m-components describe phase shifts at fixed spins. With
+    spin_conversion_phase=None a phase shift also rotates the in-plane spins, so
+    neither the DFT nor the individual-mode path gives the model's phase dependence
+    (measured: shifting the individual-mode components disagrees with the model by a
+    mismatch of 9e-3 for IMRPhenomXPHM). Both generators must refuse rather than
+    return components that look right and are not."""
+    kwargs = dict(
+        approximant="IMRPhenomXPHM",
+        domain=uniform_fd_domain,
+        f_ref=10.0,
+        f_start=10.0,
+        spin_conversion_phase=None,
+    )
+    for use_dft in (True, False):
+        wfg = WaveformGenerator(**kwargs, use_dft_phase_decomposition=use_dft)
+        assert not wfg.uses_dft_phase_decomposition
+        with pytest.raises(ValueError, match="fixed spins"):
+            wfg.generate_hplus_hcross_m(DFT_PARAMETERS[0])
 
 
 def test_dft_falls_back_without_ell_max(uniform_fd_domain, monkeypatch):

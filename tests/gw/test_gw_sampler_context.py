@@ -363,6 +363,19 @@ def test_injection_truths_move_to_event_metadata():
     assert ctx.event_metadata == record
 
 
+def test_event_data_parts_are_validated():
+    # Every part of the event data is indexed by detector downstream, so anything
+    # other than the strain and ASDs is dropped at construction, with a warning
+    # naming it (results saved from an injection dict by older code carry one).
+    with pytest.warns(UserWarning, match="extrinsic_parameters"):
+        ctx = GWSamplerContext(
+            domain=None,
+            data_prep=None,
+            event_data={"waveform": {"H1": np.zeros(3)}, "extrinsic_parameters": {}},
+        )
+    assert set(ctx.event_data) == {"waveform"}
+
+
 # Full conditional-model metadata, as serialized in Result.settings.
 _MODEL_METADATA = {
     "dataset_settings": {
@@ -576,15 +589,18 @@ def test_likelihood_sees_the_analyzed_detectors_only(monkeypatch):
         context(["H1", "V1"]).likelihood()
 
 
-def test_psd_notch_dict_survives_an_hdf5_round_trip(tmp_path):
-    # Nested interval lists come back from a Result file as 2-D arrays.
+def test_psd_notch_dict_as_arrays_from_an_old_hdf5_file(tmp_path):
+    # Result files written before lists were tagged return nested interval lists as
+    # 2-D arrays.
     import h5py
 
-    from dingo.core.dataset import recursive_hdf5_load, recursive_hdf5_save
+    from dingo.core.dataset import recursive_hdf5_load
 
     event_metadata = {"psd_notch_dict": {"L1": [[60.0, 61.0], [120.0, 121.0]]}}
     with h5py.File(tmp_path / "m.hdf5", "w") as fp:
-        recursive_hdf5_save(fp, event_metadata)
+        fp.create_dataset(
+            "psd_notch_dict/L1", data=event_metadata["psd_notch_dict"]["L1"]
+        )
     with h5py.File(tmp_path / "m.hdf5", "r") as fp:
         reloaded = recursive_hdf5_load(fp)
     assert isinstance(reloaded["psd_notch_dict"]["L1"], np.ndarray)
